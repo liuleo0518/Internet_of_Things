@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMB82 Voice LED Controller</title>
+<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem}button{font-size:1rem;margin:.25rem;padding:.6rem .9rem}#status{font-weight:600}#log{background:#111;color:#ddd;padding:1rem;min-height:14rem;white-space:pre-wrap}</style>
+<h1>AMB82 Voice LED Controller</h1><p>Say <b>turn on left blue light</b> (or <b>left</b>) for blue; say <b>turn on right green light</b> (or <b>right</b>) for green; say <b>blue</b> to blink the blue LED three times.</p>
+<button id="connect">Connect Ameba</button><button id="listen" disabled>Start listening</button><button id="statusButton" disabled>Read LED status</button><p id="status">Not connected</p><pre id="log"></pre>
+<script>
+const $=s=>document.querySelector(s),connectButton=$('#connect'),listenButton=$('#listen'),statusButton=$('#statusButton'),status=$('#status'),logBox=$('#log');
+let port,writer,reader,readBuffer='',pendingCommand=null,timeoutId;
+let recognition, shouldListen = false;
+function log(m){logBox.textContent+=`[${new Date().toLocaleTimeString()}] ${m}\n`;logBox.scrollTop=logBox.scrollHeight}function setStatus(m){status.textContent=m;log(m)}
+function setCommunicationFailed(message){
+  clearTimeout(timeoutId); pendingCommand=null; writer=null;
+  listenButton.disabled=true; statusButton.disabled=true;
+  setStatus(`Communication failed: ${message}. LED state was not changed by this request.`);
+}
+function reportLine(line){
+  log(`Board: ${line}`);
+  if(line.startsWith('ACK ')){clearTimeout(timeoutId);setStatus(`Board confirmed: ${line}`);pendingCommand=null}
+  else if(line.startsWith('ERR ')){clearTimeout(timeoutId);setStatus(`Board rejected command: ${line}. LED state was not changed.`);pendingCommand=null}
+}
+async function readLoop(){const decoder=new TextDecoder();try{while(port.readable){reader=port.readable.getReader();try{while(true){const {value,done}=await reader.read();if(done)break;readBuffer+=decoder.decode(value,{stream:true});const lines=readBuffer.split('\n');readBuffer=lines.pop();lines.forEach(x=>reportLine(x.trim()))}}finally{reader.releaseLock()}}}catch(error){setCommunicationFailed(`connection interrupted (${error.message})`)}finally{if(writer)setCommunicationFailed('serial port was disconnected')}}
+async function send(command){
+  if(!writer){setStatus('Communication failed: Ameba is not connected. LED state was not changed.');return}
+  if(pendingCommand){setStatus('Waiting for previous board response; no new LED command was sent.');return}
+  pendingCommand=command;log(`Send: ${command}`);
+  try{
+    await writer.write(new TextEncoder().encode(`${command}\n`));
+    timeoutId=setTimeout(()=>{if(pendingCommand===command){pendingCommand=null;setStatus(`Communication timeout for ${command}; LED state is unknown and no further command was sent.`)}},3000);
+  }catch(error){setCommunicationFailed(`could not send ${command} (${error.message})`)}
+}
+connectButton.onclick=async()=>{if(!('serial'in navigator)){setStatus('Web Serial is unavailable. Use Chrome or Edge on a computer.');return}try{port=await navigator.serial.requestPort();await port.open({baudRate:115200});writer=port.writable.getWriter();listenButton.disabled=false;statusButton.disabled=false;setStatus('Connected.');readLoop()}catch(error){setStatus(`Connection failed: ${error.message}`)}};
+statusButton.onclick=()=>send('STATUS');
+listenButton.onclick=()=>{
+  const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!Recognition){setStatus('Speech recognition is unavailable. Use Chrome or Edge and allow microphone access.');return}
+
+  if(shouldListen){
+    shouldListen=false;
+    listenButton.textContent='Start listening';
+    recognition.stop();
+    setStatus('Listening stopped.');
+    return;
+  }
+
+  if(!recognition){
+    recognition=new Recognition();
+    recognition.lang='en-US';
+    recognition.continuous=true;
+    recognition.interimResults=false;
+    recognition.maxAlternatives=1;
+    recognition.onresult=e=>{
+      const text=e.results[e.results.length-1][0].transcript.toLowerCase();
+      log(`Recognized: ${text}`);
+      if(/\bleft\b/.test(text))send('LEFT');
+      else if(/\bright\b/.test(text))send('RIGHT');
+      else if(/\bblue\b/.test(text))send('BLUE');
+      else setStatus(`Not a control command: "${text}". LED state was not changed.`);
+    };
+    recognition.onerror=e=>{
+      if(e.error==='no-speech') setStatus('No speech was recognized. LED state was not changed.');
+      else if(e.error!=='aborted') setStatus(`Speech recognition error: ${e.error}. LED state was not changed.`);
+    };
+    recognition.onnomatch=()=>setStatus('Speech was not recognized as a command. LED state was not changed.');
+    recognition.onend=()=>{
+      if(shouldListen) setTimeout(()=>recognition.start(),200);
+    };
+  }
+  shouldListen=true;
+  listenButton.textContent='Stop listening';
+  setStatus('Continuous listening is on. Say left or right.');
+  recognition.start();
+};
+</script>
+</html>
